@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
     private EditText etPath;
     private FileAdapter adapter;
     private List<FileItem> fileList = new ArrayList<>();
+    private OpenWithHelper openWithHelper;
     private String currentPath = "/storage/emulated/0";
     private java.util.Stack<String> backStack = new java.util.Stack<>();
     private java.util.Stack<String> forwardStack = new java.util.Stack<>();
@@ -66,6 +67,7 @@ public class MainActivity extends Activity {
     private boolean zpaqVersionSortAscending = false; // 版本列表排序：false=降序(最新在上)
     private String archivePreviewZpaqUntil = "";
     private java.util.List<ZPAQNative.ArchiveVersion> archivePreviewZpaqVersions = new ArrayList<>();
+    private java.util.List<AlertDialog> archiveDialogStack = new ArrayList<>();
     private java.util.concurrent.atomic.AtomicBoolean alreadyHandled = new java.util.concurrent.atomic.AtomicBoolean(false);
     private int sortMode = 0; // 0=名称升序, 1=名称降序, 2=大小升序, 3=大小降序, 4=日期升序, 5=日期降序
     private String[] sortNames = {"名称↑","名称↓","大小↑","大小↓","日期↑","日期↓"};
@@ -79,6 +81,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         try {
             setContentView(R.layout.activity_main);
+        openWithHelper = new OpenWithHelper(this);
             listView = findViewById(R.id.listView);
             lvSuggest = findViewById(R.id.lvSuggest);
             suggestAdapter = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new java.util.ArrayList<>());
@@ -88,13 +91,8 @@ public class MainActivity extends Activity {
             btnForward = findViewById(R.id.btnForward);
             btnGo = findViewById(R.id.btnGo);
             btnGrant = findViewById(R.id.btnGrant);
-            btnCut = findViewById(R.id.btnCut);
-            btnCopy = findViewById(R.id.btnCopy);
             btnPaste = findViewById(R.id.btnPaste);
-            btnDelete = findViewById(R.id.btnDelete);
-            btnRename = findViewById(R.id.btnRename);
             btnNewFolder = findViewById(R.id.btnNewFolder);
-            btnInfo = findViewById(R.id.btnInfo);
             btnDetail = findViewById(R.id.btnDetail);
             btnSort = findViewById(R.id.btnSort);
             etPath = findViewById(R.id.etPath);
@@ -181,25 +179,8 @@ public class MainActivity extends Activity {
                     navigateTo(forwardStack.pop());
                 } else showToast("已到末尾");
             });
-            btnCut.setOnClickListener(v -> {
-                if (!selectedPaths.isEmpty()) {
-                    clipboardPaths = new ArrayList<>(selectedPaths);
-                    clipboardIsCut = true;
-                    showToast("已剪切 " + clipboardPaths.size() + " 项");
-                } else showToast("请先选择文件");
-            });
-            btnCopy.setOnClickListener(v -> {
-                if (!selectedPaths.isEmpty()) {
-                    clipboardPaths = new ArrayList<>(selectedPaths);
-                    clipboardIsCut = false;
-                    showToast("已复制 " + clipboardPaths.size() + " 项");
-                } else showToast("请先选择文件");
-            });
             btnPaste.setOnClickListener(v -> pasteFiles());
-            btnDelete.setOnClickListener(v -> deleteFiles());
-            btnRename.setOnClickListener(v -> showRenameDialog());
             btnNewFolder.setOnClickListener(v -> showNewFolderDialog());
-            btnInfo.setOnClickListener(v -> showFileInfo());
 
             btnDetail.setOnClickListener(v -> {
                 detailMode = !detailMode;
@@ -208,9 +189,14 @@ public class MainActivity extends Activity {
             });
             btnSort.setOnClickListener(v -> {
                 sortMode = (sortMode + 1) % sortNames.length;
-                btnSort.setText("排序:" + sortNames[sortMode]);
+                btnSort.setText("序");
                 sortFiles();
                 adapter.notifyDataSetChanged();
+                showToast("排序: " + sortNames[sortMode]);
+            });
+            btnSort.setOnLongClickListener(v -> {
+                showSortMenu();
+                return true;
             });
 
             pathWatcher = new android.text.TextWatcher() {
@@ -310,14 +296,14 @@ public class MainActivity extends Activity {
         return dialog;
     }
 
-    private AlertDialog.Builder createBaseDialog(String title, View content) {
+    public AlertDialog.Builder createBaseDialog(String title, View content) {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle(title);
         if (content != null) builder.setView(content);
         return builder;
     }
 
-    private LinearLayout createDialogContainer() {
+    public LinearLayout createDialogContainer() {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(20);
@@ -378,7 +364,7 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private void styleDialogButtons(AlertDialog dialog) {
+    public void styleDialogButtons(AlertDialog dialog) {
         Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         Button negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
         Button neutral = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
@@ -589,7 +575,7 @@ public class MainActivity extends Activity {
         return prefix + ": " + name;
     }
 
-    private int dp(int value) { return Math.round(getResources().getDisplayMetrics().density * value); }
+    public int dp(int value) { return Math.round(getResources().getDisplayMetrics().density * value); }
 
     private String getSingleSelectedPath() {
         if (selectedPaths.size() != 1) {
@@ -601,28 +587,43 @@ public class MainActivity extends Activity {
 
     private void showContextMenu(View anchor, FileItem item) {
 
-        String[] items = {"创建副本", "重命名", "删除", "压缩ZIP", "解压到当前", "解压到同名目录", "详情", "复制路径"};
+        final boolean isArchive = isArchiveFile(item.name);
+        final String[] items = isArchive
+                ? new String[]{"打开方式", "复制", "剪切", "创建副本", "重命名", "删除", "详情", "压缩ZIP", "解压到当前", "解压到同名目录"}
+                : new String[]{"打开方式", "复制", "剪切", "创建副本", "重命名", "删除", "详情", "压缩ZIP"};
         LinearLayout container = createDialogContainer();
         container.addView(createDialogMessageView(formatSelectionSummary() + "\n目标: " + item.name));
         AlertDialog.Builder b = createBaseDialog(item.name, container);
         b.setItems(items, (d, which) -> {
             switch (which) {
-                case 0: copyFile(item.path); break;
-                case 1: showRenameDialog(item.path); break;
-                case 2: confirmDeleteSingle(item.path); break;
-                case 3:
-                    selectedPaths.clear(); selectedPaths.add(item.path); zipSelected(); break;
-                case 4:
-                    selectedPaths.clear(); selectedPaths.add(item.path); extractArchive(item.path, currentPath); break;
-                case 5:
-                    selectedPaths.clear(); selectedPaths.add(item.path);
-                    String dirName = item.path.replaceAll("\\.(zip|7z|rar|zpaq)$", "");
-                    extractArchive(item.path, dirName); break;
+                case 0:
+                    openWithHelper.showAppChooserDialog(item.path, item.name); break;
+                case 1:
+                    clipboardPaths = new ArrayList<>(selectedPaths.isEmpty() ? java.util.Collections.singletonList(item.path) : selectedPaths);
+                    clipboardIsCut = false;
+                    showToast("已复制 " + clipboardPaths.size() + " 项"); break;
+                case 2:
+                    clipboardPaths = new ArrayList<>(selectedPaths.isEmpty() ? java.util.Collections.singletonList(item.path) : selectedPaths);
+                    clipboardIsCut = true;
+                    showToast("已剪切 " + clipboardPaths.size() + " 项"); break;
+                case 3: copyFile(item.path); break;
+                case 4: showRenameDialog(item.path); break;
+                case 5: confirmDeleteSingle(item.path); break;
                 case 6: showItemInfo(item); break;
                 case 7:
-                    ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                    cm.setPrimaryClip(ClipData.newPlainText("path", item.path));
-                    showToast("路径已复制"); break;
+                    selectedPaths.clear(); selectedPaths.add(item.path); zipSelected(); break;
+                case 8:
+                    if (isArchive) {
+                        selectedPaths.clear(); selectedPaths.add(item.path); extractArchive(item.path, currentPath);
+                    }
+                    break;
+                case 9:
+                    if (isArchive) {
+                        selectedPaths.clear(); selectedPaths.add(item.path);
+                        String dirName = item.path.replaceAll("\\.(zip|7z|rar|zpaq)$", "");
+                        extractArchive(item.path, dirName);
+                    }
+                    break;
             }
         });
         AlertDialog dialog = b.create();
@@ -820,9 +821,28 @@ public class MainActivity extends Activity {
             sb.append("权限: ").append(item.perm).append("\n");
             sb.append("可读: ").append(f.canRead()).append("\n");
             sb.append("可写: ").append(f.canWrite()).append("\n");
-            sb.append("隐藏: ").append(f.isHidden());
+            sb.append("隐藏: ").append(f.isHidden()).append("\n");
         }
-        showMaterialInfoDialog("文件详情", sb.toString());
+        sb.append("\n长按可复制路径");
+        final String infoText = sb.toString();
+        AlertDialog dialog = createBaseDialog("文件详情", createDialogContainer())
+                .setMessage(infoText)
+                .setPositiveButton("确定", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            TextView tvMessage = dialog.findViewById(android.R.id.message);
+            if (tvMessage != null) {
+                tvMessage.setTextIsSelectable(true);
+                tvMessage.setOnLongClickListener(v -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("path", item.path));
+                    showToast("路径已复制");
+                    return true;
+                });
+            }
+        });
+        dialog.show();
+        styleDialogButtons(dialog);
     }
 
     private void zipSelected() {
@@ -1287,8 +1307,10 @@ public class MainActivity extends Activity {
             btnGrant.setVisibility(View.VISIBLE);
         }
         currentPath = path;
+        String displayPath = path.endsWith("/") ? path : path + "/";
         if (pathWatcher != null) etPath.removeTextChangedListener(pathWatcher);
-        etPath.setText(path);
+        etPath.setText(displayPath);
+        etPath.setSelection(displayPath.length());
         if (pathWatcher != null) etPath.addTextChangedListener(pathWatcher);
         fileList.clear();
         selectedPaths.clear();
@@ -1391,6 +1413,25 @@ public class MainActivity extends Activity {
         return item;
     }
 
+    private boolean isArchiveFile(String name) {
+        if (name == null) return false;
+        String lower = name.toLowerCase();
+        return lower.endsWith(".zip") || lower.endsWith(".7z") || lower.endsWith(".rar") || lower.endsWith(".zpaq");
+    }
+
+    private void showSortMenu() {
+        String[] items = {"名称 升序", "名称 降序", "大小 升序", "大小 降序", "日期 升序", "日期 降序"};
+        createBaseDialog("选择排序", createDialogContainer())
+                .setSingleChoiceItems(items, sortMode, (d, which) -> {
+                    sortMode = which;
+                    sortFiles();
+                    adapter.notifyDataSetChanged();
+                    showToast("排序: " + sortNames[sortMode]);
+                    d.dismiss();
+                })
+                .show();
+    }
+
     private void sortFiles() {
         Collections.sort(fileList, (a, b) -> {
             if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
@@ -1414,17 +1455,41 @@ public class MainActivity extends Activity {
             previewArchive(item.path);
             return;
         }
-        String mime = getMimeType(item.name);
-        try {
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            File file = new File(item.path);
-            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
-            intent.setDataAndType(uri, mime);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(intent);
-        } catch (Exception e) {
-            showToast("无法打开此文件");
+        String ext = OpenWithHelper.getFileExt(item.name);
+        String remembered = openWithHelper.getRememberedChoice(ext);
+        if (remembered != null) {
+            if ("internal".equals(remembered)) {
+                openWithHelper.viewInAmazeLite(item.path, item.name);
+            } else {
+                try {
+                    String[] parts = remembered.split("/");
+                    if (parts.length >= 2) {
+                        String mime = OpenWithHelper.getMimeTypeFull(item.name);
+                        android.content.pm.ResolveInfo ri = null;
+                        java.util.List<android.content.pm.ResolveInfo> apps = openWithHelper.queryAppsForFile(item.path, mime);
+                        for (android.content.pm.ResolveInfo r : apps) {
+                            if ((r.activityInfo.packageName + "/" + r.activityInfo.name).equals(remembered)) {
+                                ri = r;
+                                break;
+                            }
+                        }
+                        if (ri != null) {
+                            openWithHelper.openWithApp(item.path, mime, ri);
+                        } else {
+                            openWithHelper.clearRememberedChoice(ext);
+                            openWithHelper.showAppChooserDialog(item.path, item.name);
+                        }
+                    } else {
+                        openWithHelper.clearRememberedChoice(ext);
+                        openWithHelper.showAppChooserDialog(item.path, item.name);
+                    }
+                } catch (Exception e) {
+                    openWithHelper.clearRememberedChoice(ext);
+                    openWithHelper.showAppChooserDialog(item.path, item.name);
+                }
+            }
+        } else {
+            openWithHelper.showAppChooserDialog(item.path, item.name);
         }
     }
     class ArchiveNode {
@@ -1479,7 +1544,7 @@ public class MainActivity extends Activity {
                     showToast("无法读取压缩包");
                     return;
                 }
-                showArchiveDir(arcPath, entries, "", null, "压缩包: " + new File(arcPath).getName());
+                showArchiveDir(arcPath, entries, "", null, "压缩包: " + new File(arcPath).getName(), true);
             });
         }).start();
     }
@@ -1953,8 +2018,9 @@ public class MainActivity extends Activity {
             showZpaqVersionChooser(arcPath);
         });
     }
-    private void showArchiveDir(final String arcPath, final List<ArchiveNode> allEntries,
-                                final String prefix, final String parentPrefix, String title) {
+private void showArchiveDir(final String arcPath, final List<ArchiveNode> allEntries,
+                                final String prefix, final String parentPrefix, String title, boolean isRootLevel) {
+        final boolean[] exitPreviewRequested = new boolean[]{false};
         List<ArchiveNode> currentLevel = new ArrayList<>();
         java.util.LinkedHashMap<String, ArchiveNode> currentLevelMap = new java.util.LinkedHashMap<>();
         String p = prefix;
@@ -2002,7 +2068,7 @@ public class MainActivity extends Activity {
             return a.name.compareToIgnoreCase(b.name);
         });
 
-
+        String dialogTitle = isRootLevel ? (title + " · 预览") : title;
         CheckBox cb = createDialogCheckBox("显示完整信息", archivePreviewFullDetails);
         LinearLayout container = createDialogContainer();
         container.addView(cb);
@@ -2021,33 +2087,32 @@ public class MainActivity extends Activity {
         listView.setLayoutParams(listParams);
         container.addView(listView);
 
-        AlertDialog.Builder b = createBaseDialog(formatArchiveDialogTitle(title, currentLevel.size()), container);
+        AlertDialog.Builder b = createBaseDialog(formatArchiveDialogTitle(dialogTitle, currentLevel.size()), container);
         final AlertDialog[] dialogRef = new AlertDialog[1];
         cb.setOnCheckedChangeListener((buttonView, isChecked) -> {
             archivePreviewFullDetails = isChecked;
             if (dialogRef[0] != null && dialogRef[0].isShowing()) dialogRef[0].dismiss();
-            showArchiveDir(arcPath, allEntries, prefix, parentPrefix, title);
+            if (!exitPreviewRequested[0]) {
+                showArchiveDir(arcPath, allEntries, prefix, parentPrefix, title, isRootLevel);
+            }
         });
 
         listView.setOnItemClickListener((parent, view, which, id) -> {
             ArchiveNode selectedNode = currentLevel.get(which);
             if (selectedNode.isDir) {
                 showArchiveDir(arcPath, allEntries, selectedNode.fullPath, basePrefix,
-                    "压缩包: " + new File(arcPath).getName() + " / " + selectedNode.fullPath);
+                    "压缩包: " + new File(arcPath).getName() + " / " + selectedNode.fullPath, false);
                 return;
             }
-            // 点击文件：解压到临时目录后用系统应用打开
             try {
                 String entryPath = selectedNode.fullPath;
                 String mime = getMimeType(entryPath);
                 Intent intent = new Intent(Intent.ACTION_VIEW);
                 String tmpDir = getCacheDir() + "/archive_preview/";
                 new File(tmpDir).mkdirs();
-                // zpaq 不支持按单文件模式筛选，提取整个归档到临时目录再找
                 if (arcPath.toLowerCase().endsWith(".zip")) {
                     extractOneFromZip(arcPath, entryPath, tmpDir);
                 } else if (arcPath.toLowerCase().endsWith(".zpaq")) {
-                    // 使用归档内完整路径精确提取单个文件
                     String exactPath = "/" + entryPath.replaceAll("^\\d{4}/", "");
                     android.util.Log.d("AmazeLite", "extractSingle: arc=" + arcPath + " path=" + exactPath + " out=" + tmpDir + " until=" + archivePreviewZpaqUntil);
                     ZPAQNative.CommandResult result = ZPAQNative.extractSingleEntry(arcPath, exactPath, tmpDir, archivePreviewZpaqUntil);
@@ -2062,14 +2127,11 @@ public class MainActivity extends Activity {
                 } else {
                     execSilent("7z x \"" + arcPath + "\" \"" + entryPath + "\" -o\"" + tmpDir + "\" -y");
                 }
-                // 在 tmpDir 下搜索目标文件（zpaq 提取后路径为 storage/emulated/0/yuedumd/文件名）
-                // 去掉版本前缀和第一级目录，取文件相对路径
                 String searchPath = entryPath.replaceAll("^\\d{4}/", "");
                 File actualFile = new File(tmpDir, searchPath);
                 if (!actualFile.exists()) {
                     actualFile = new File(tmpDir, new File(entryPath).getName());
                 }
-                // 最后尝试：遍历 tmpDir 下所有文件，找文件名匹配的
                 if (!actualFile.exists()) {
                     java.io.File[] allFiles = new java.io.File(tmpDir).listFiles();
                     if (allFiles != null) {
@@ -2103,18 +2165,34 @@ public class MainActivity extends Activity {
             return true;
         });
 
-        b.setNegativeButton(parentPrefix != null ? "返回上级" : "关闭", (d, w) -> {
-            if (parentPrefix != null) {
-                showArchiveDir(arcPath, allEntries, parentPrefix, null, "压缩包: " + new File(arcPath).getName());
-            }
-        });
-        b.setNeutralButton("退出", (d, w) -> d.dismiss());
+        if (isRootLevel) {
+            b.setNegativeButton("关闭", (d, w) -> d.dismiss());
+            b.setPositiveButton("退出预览", (d, w) -> {
+                exitPreviewRequested[0] = true;
+                for (AlertDialog ad : archiveDialogStack) {
+                    try { if (ad.isShowing()) ad.dismiss(); } catch (Exception ignored) {}
+                }
+                archiveDialogStack.clear();
+            });
+        } else if (parentPrefix != null) {
+            b.setNegativeButton("返回上级", (d, w) -> {
+                showArchiveDir(arcPath, allEntries, parentPrefix, null, "压缩包: " + new File(arcPath).getName(), false);
+            });
+            b.setPositiveButton("退出预览", (d, w) -> {
+                for (AlertDialog ad : archiveDialogStack) {
+                    try { if (ad.isShowing()) ad.dismiss(); } catch (Exception ignored) {}
+                }
+                archiveDialogStack.clear();
+            });
+        } else {
+            b.setNegativeButton("关闭", (d, w) -> d.dismiss());
+        }
         AlertDialog dialog = b.create();
+        archiveDialogStack.add(dialog);
         dialog.show();
         styleDialogButtons(dialog);
         dialogRef[0] = dialog;
     }
-
     private void extractOneFromZip(String zipPath, String entryName, String outDir) throws Exception {
         ZipInputStream zis = new ZipInputStream(new FileInputStream(zipPath));
         byte[] buf = new byte[8192];
@@ -2386,13 +2464,10 @@ public class MainActivity extends Activity {
     }
 
     private void updateButtonState() {
-        boolean hasSel = !selectedPaths.isEmpty();
-        btnCut.setEnabled(hasSel);
-        btnCopy.setEnabled(hasSel);
-        btnDelete.setEnabled(hasSel);
-        btnRename.setEnabled(hasSel);
-        btnInfo.setEnabled(hasSel);
         btnPaste.setEnabled(!clipboardPaths.isEmpty());
+        btnNewFolder.setEnabled(true);
+        btnDetail.setEnabled(true);
+        btnSort.setEnabled(true);
 
     }
 
@@ -2434,7 +2509,7 @@ public class MainActivity extends Activity {
         sortFiles();
     }
 
-    private void showToast(String msg) {
+    public void showToast(String msg) {
     android.os.Handler handler = new android.os.Handler(android.os.Looper.getMainLooper());
     handler.post(() -> {
         try {
